@@ -1,0 +1,58 @@
+/* =========================================================================
+   DESIGN TOKENS — sección 2 del documento fuente.
+   Todo valor visual del juego debe referenciarse por variable, nunca
+   hardcodeado, para poder reemplazar por marca oficial del cliente
+   editando solo este archivo (equivalente al theme.json de la sección 22).
+   ========================================================================= */
+
+:root {
+  /* --- 2.1 Paleta de color --- */
+  --color-primary: #1565C0;
+  --color-primary-dark: #0D47A1;
+  --color-primary-light: #64B5F6;
+  --color-blueprint-background: #0B3D91;
+  --color-blueprint-grid-minor: #2F6FCB;
+  --color-blueprint-grid-major: #5B9BE0;
+  --color-accent: #FF6F00;
+  --color-success: #2E7D32;
+  --color-warning: #F9A825;
+  --color-danger: #C62828;
+  --color-neutral-white: #FFFFFF;
+  --color-neutral-dark: #1B1F27;
+  --color-ui-panel: #F4F7FB;
+  --color-ui-panel-border: #D6E0EC;
+
+  /* --- 6.1 Colores de acento por categoría de pieza --- */
+  --color-cat-estructuras: #8D6E63;
+  --color-cat-movilidad: #42A5F5;
+  --color-cat-impulso: #FF7043;
+  --color-cat-interaccion: #AB47BC;
+  --color-cat-destruccion: #EF5350;
+  --color-cat-especiales: #26A69A;
+
+  /* --- 2.2 Tipografía ---
+     Nota: se usan pilas de fuentes del sistema como fallback porque este
+     proyecto está pensado para poder abrirse sin conexión (offline-first,
+     ver sección 21). Si hay conexión, se puede sumar @import de Fredoka/
+     Nunito/JetBrains Mono sin tocar el resto del CSS: solo estas 3 líneas. */
+  --font-display: "Baloo 2", "Segoe UI Rounded", "Comic Sans MS", sans-serif;
+  --font-body: "Nunito", "Segoe UI", system-ui, sans-serif;
+  --font-blueprint: "JetBrains Mono", "Consolas", "Courier New", monospace;
+
+  /* --- 2.4 Radios, sombras, espaciado --- */
+  --radius-sm: 4px;
+  --radius-md: 10px;
+  --radius-lg: 18px;
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.15);
+  --spacing-unit: 8px;
+
+  /* --- Layout (sección 4.4), no son "tokens de marca" pero se centralizan
+     acá para que todo el CSS los use en vez de números sueltos --- */
+  --topbar-height: 56px;
+  --rightpanel-width: 280px;
+  --bottombar-height: 96px;
+  --inventory-width: 240px;
+
+  /* --- Unidad de Grilla (UG), sección 0 y 3: 1 UG = 64px a 1920x1080 --- */
+  --ug-px: 64px;
+}
