@@ -67,7 +67,11 @@ RGM.Constants = (() => {
   };
 
   // --- Timeout de "fallo" si nada llega a la meta ---
-  const FAILURE_TIMEOUT_MS = 15000;
+  // Ya NO hay límite de tiempo. El juego solo termina si:
+  //  - todas las bolas principales salieron del PERÍMETRO (en UG), o
+  //  - pasó STILL_LIMIT_STEPS pasos físicos sin que se mueva NADA (salvo poleas).
+  const PERIMETER_UG = { left: -4, top: -14, right: 64, bottom: 38 };
+  const STILL_LIMIT_STEPS = 600; // 10 s a 60 pasos/s
 
   // --- Snapping (sección 4.4.2) ---
   const SNAP_DISTANCE_UG = 0.35;
@@ -81,7 +85,8 @@ RGM.Constants = (() => {
     SIM_STATE,
     SCENE,
     COLLISION,
-    FAILURE_TIMEOUT_MS,
+    PERIMETER_UG,
+    STILL_LIMIT_STEPS,
     SNAP_DISTANCE_UG,
   };
 })();
@@ -2149,7 +2154,12 @@ RGM.Logic = (() => {
     RGM.Events.emit("logic:actionRan", action);
   }
 
-  return { install, uninstall };
+  // ¿Hay algo animándose por lógica (compuertas girando)? Cuenta como actividad.
+  function isBusy() {
+    return activeRotations.size > 0;
+  }
+
+  return { install, uninstall, isBusy };
 })();
 
 /* ===== tornillin.js ===== */
@@ -2308,7 +2318,11 @@ RGM.Simulation = (() => {
   let allBodies = [];
   let mainBodies = []; // objetos "principales" activos (Inicio real + Bola/Ratón puestos como pieza)
   let onStateChange = null;
-  let currentTimeoutMs = 0; // límite propio del diseño (0 = usar el global)
+  let failureReason = null; // 'perimeter' | 'stalled'
+  let simSteps = 0;
+  let lastActivityStep = 0;
+  let activitySnapshot = new Map();
+  let hookIds = new Set(); // ganchos de poleas: su movimiento NO cuenta como actividad
   let onFrame = null;
 
   function getState() {
@@ -2328,7 +2342,11 @@ RGM.Simulation = (() => {
     allBodies = [];
     mainBodies = [];
     elapsedSimMs = 0;
-    currentTimeoutMs = design.timeoutMs || 0;
+    failureReason = null;
+    simSteps = 0;
+    lastActivityStep = 0;
+    activitySnapshot = new Map();
+    hookIds = new Set();
     speedMultiplier = 1.0;
 
     // Piezas colocadas. Ya no hay un "objeto de inicio" ni "objeto
@@ -2368,6 +2386,8 @@ RGM.Simulation = (() => {
       }
       if (result.pulleyMeta) {
         pulleySystems.push(result.pulleyMeta);
+        hookIds.add(result.pulleyMeta.hookLeft.id);
+        hookIds.add(result.pulleyMeta.hookRight.id);
       }
     }
 
@@ -2386,20 +2406,9 @@ RGM.Simulation = (() => {
   }
 
 
-  function addPlayfieldBounds(design) {
-    const wPx = RGM.PhysicsEngine.ugToPx(C.PLAYFIELD_UG_W);
-    const hPx = RGM.PhysicsEngine.ugToPx(C.PLAYFIELD_UG_H);
-    const thickness = 40;
-    const floor = Matter.Bodies.rectangle(wPx / 2, hPx + thickness / 2, wPx * 2, thickness, {
-      isStatic: true,
-      label: "bounds:floor",
-    });
-    // El piso de límites es un poco más abajo del plano visible: si un
-    // objeto llega hasta acá, es indudablemente un fallo (se "cayó del
-    // mundo"), no una plataforma legítima del diseño.
-    floor.position.y = hPx + 300;
-    Matter.World.add(engine.world, floor);
-    allBodies.push(floor);
+  function addPlayfieldBounds() {
+    // Sin piso invisible: lo que sale del PERÍMETRO (ver C.PERIMETER_UG y
+    // checkFailureConditions) se saca del juego.
   }
 
   function setState(next) {
@@ -2477,24 +2486,54 @@ RGM.Simulation = (() => {
    */
   function checkFailureConditions() {
     if (state !== C.SIM_STATE.RUNNING) return;
+    simSteps++;
 
-    if (elapsedSimMs > (currentTimeoutMs || C.FAILURE_TIMEOUT_MS)) {
+    // 1) PERÍMETRO: todo cuerpo móvil que sale de la zona marcada se saca del
+    // juego (así una bola que vuela al infinito no mantiene viva la partida).
+    const P = C.PERIMETER_UG;
+    const minX = RGM.PhysicsEngine.ugToPx(P.left);
+    const maxX = RGM.PhysicsEngine.ugToPx(P.right);
+    const minY = RGM.PhysicsEngine.ugToPx(P.top);
+    const maxY = RGM.PhysicsEngine.ugToPx(P.bottom);
+    for (let i = allBodies.length - 1; i >= 0; i--) {
+      const body = allBodies[i];
+      if (body.isStatic || hookIds.has(body.id)) continue;
+      const p = body.position;
+      if (p.x < minX || p.x > maxX || p.y < minY || p.y > maxY) {
+        Matter.World.remove(engine.world, body);
+        allBodies.splice(i, 1);
+        const mi = mainBodies.indexOf(body);
+        if (mi !== -1) mainBodies.splice(mi, 1);
+        activitySnapshot.delete(body.id);
+      }
+    }
+
+    // Se pierde cuando ya no queda ninguna bola principal dentro del perímetro.
+    if (mainBodies.length === 0) {
+      failureReason = "perimeter";
       setState(C.SIM_STATE.FAILURE);
       return;
     }
 
-    const outOfBoundsY = RGM.PhysicsEngine.ugToPx(C.PLAYFIELD_UG_H) + 250;
-    for (let i = mainBodies.length - 1; i >= 0; i--) {
-      const body = mainBodies[i];
-      if (body.position.y > outOfBoundsY) {
-        Matter.World.remove(engine.world, body);
-        const idx = allBodies.indexOf(body);
-        if (idx !== -1) allBodies.splice(idx, 1);
-        mainBodies.splice(i, 1);
+    // 2) ACTIVIDAD: mientras algo se mueva (aunque sea despacio) o una
+    // compuerta esté girando, la máquina sigue viva. Los ganchos de las
+    // poleas no cuentan. Si NADA se mueve durante STILL_LIMIT_STEPS, se
+    // da por detenida.
+    if (simSteps % 30 === 0) {
+      let moving = RGM.Logic.isBusy();
+      for (const body of allBodies) {
+        if (body.isStatic || hookIds.has(body.id)) continue;
+        const prev = activitySnapshot.get(body.id);
+        const cur = { x: body.position.x, y: body.position.y, a: body.angle };
+        if (!prev || Math.hypot(cur.x - prev.x, cur.y - prev.y) > 1.0 || Math.abs(cur.a - prev.a) > 0.03) {
+          moving = true;
+        }
+        activitySnapshot.set(body.id, cur);
       }
+      if (moving) lastActivityStep = simSteps;
     }
-
-    if (mainBodies.length === 0) {
+    if (simSteps - lastActivityStep > C.STILL_LIMIT_STEPS) {
+      failureReason = "stalled";
       setState(C.SIM_STATE.FAILURE);
       return;
     }
@@ -2506,12 +2545,17 @@ RGM.Simulation = (() => {
     RGM.Tornillin.checkStuck(maxV, false);
   }
 
+  function getFailureReason() {
+    return failureReason;
+  }
+
   function getStartBodyVelocity() {
     return mainBodies.reduce((max, b) => Math.max(max, Matter.Vector.magnitude(b.velocity)), 0);
   }
 
   return {
     getState,
+    getFailureReason,
     build,
     pause,
     resume,
@@ -3220,6 +3264,13 @@ RGM.UI = (() => {
     hideStateBanner();
   }
 
+  function failureBannerText() {
+    const r = RGM.Simulation.getFailureReason();
+    if (r === "stalled") return "MÁQUINA DETENIDA: nada se mueve";
+    if (r === "perimeter") return "LA BOLA SALIÓ DEL PERÍMETRO";
+    return "NO SE LOGRÓ...";
+  }
+
   function handleSimStateChange(state) {
     if (challenge && challenge.phase === "build") {
       if (state === C.SIM_STATE.SUCCESS) {
@@ -3227,7 +3278,7 @@ RGM.UI = (() => {
         RGM.Tornillin.onSuccess();
         setTimeout(() => showChallengeResult(true), 900);
       } else if (state === C.SIM_STATE.FAILURE) {
-        showStateBanner("NO SE LOGRÓ...", "failure");
+        showStateBanner(failureBannerText(), "failure");
         setTimeout(() => showChallengeResult(false), 900);
       }
       return;
@@ -3237,7 +3288,7 @@ RGM.UI = (() => {
       RGM.Tornillin.onSuccess();
       setTimeout(() => showResultModal(true), 900);
     } else if (state === C.SIM_STATE.FAILURE) {
-      showStateBanner("NO SE LOGRÓ...", "failure");
+      showStateBanner(failureBannerText(), "failure");
       setTimeout(() => showResultModal(false), 900);
     }
   }
@@ -4064,6 +4115,7 @@ RGM.UI = (() => {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     drawGrid();
+    drawPerimeter();
 
     if (scene === C.SCENE.SIMULATION) {
       drawSimulationBodies();
@@ -4079,6 +4131,24 @@ RGM.UI = (() => {
     }
 
     el.zoomIndicator.textContent = `Zoom ${(camera.zoom * 100).toFixed(0)}%`;
+  }
+
+  // Perímetro de juego: si la bola principal sale de este marco, se pierde.
+  function drawPerimeter() {
+    const P = C.PERIMETER_UG;
+    const a = worldToScreen(P.left * C.UG_PX, P.top * C.UG_PX);
+    const b = worldToScreen(P.right * C.UG_PX, P.bottom * C.UG_PX);
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = "#FF6B6B";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([12, 8]);
+    ctx.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#FF6B6B";
+    ctx.font = "12px system-ui, sans-serif";
+    ctx.fillText("Perímetro: si la bola sale de acá, se pierde", a.x + 8, b.y - 8);
+    ctx.restore();
   }
 
   function drawGrid() {
@@ -4648,7 +4718,6 @@ RGM.UI = (() => {
         const bg = lv.design.background;
         design = RGM.Design.createEmpty(lv.title + " (réplica)");
         design.background = bg;
-        if (lv.design.timeoutMs) design.timeoutMs = lv.design.timeoutMs; // misma duración máxima que la original
         particles = [];
         challenge.phase = "build";
         challenge.phaseStart = now;
